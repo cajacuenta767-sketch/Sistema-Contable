@@ -17,7 +17,7 @@ export default async function LoginPage({
   const { next } = await searchParams
 
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-[var(--surface-0)] px-4 py-10">
+    <main className="flex min-h-dvh items-center justify-center bg-[var(--surface-0)] px-4 py-10" suppressHydrationWarning>
       <div className="w-full max-w-sm">
         <div className="mb-7 text-center">
           <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-xl bg-[var(--brand)] text-white">

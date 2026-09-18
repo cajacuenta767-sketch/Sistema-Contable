@@ -46,7 +46,7 @@ export function LoginForm({ redirectTo }: { redirectTo: string }) {
   return (
     <Card>
       <CardBody>
-        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+        <form onSubmit={handleSubmit} className="space-y-4" noValidate suppressHydrationWarning>
           <Input
             label="Correo electronico"
             type="email"

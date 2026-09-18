@@ -12,6 +12,7 @@ export function Card({
 }) {
   return (
     <Tag
+      suppressHydrationWarning
       className={cn(
         'rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] shadow-[var(--shadow-sm)]',
         className,
@@ -47,5 +48,5 @@ export function CardHeader({
 }
 
 export function CardBody({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn('p-4 sm:p-5', className)}>{children}</div>
+  return <div suppressHydrationWarning className={cn('p-4 sm:p-5', className)}>{children}</div>
 }

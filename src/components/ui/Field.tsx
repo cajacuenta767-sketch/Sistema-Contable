@@ -43,7 +43,7 @@ function FieldShell({
   children: ReactNode
 }) {
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1.5" suppressHydrationWarning>
       <label
         htmlFor={inputId}
         className={cn(
