@@ -1,0 +1,425 @@
+// Sistema de Gestion para Estudio Contable
+// Postgres 16+. Disenado para 200+ clientes y ~1000 tareas/mes.
+//
+// Convenciones:
+//  - Todos los timestamps se guardan en UTC. La zona horaria de negocio
+//    (BUSINESS_TIMEZONE) solo se aplica al calcular vencimientos y al
+//    delimitar "hoy" en los reportes.
+//  - `period` usa formato "YYYY-MM": ordena lexicograficamente igual que
+//    cronologicamente, asi que sirve para indices y rangos sin funciones.
+//  - Ningun registro se borra fisicamente: se archiva (status) o se conserva
+//    en AuditLog. En contabilidad el rastro es obligatorio.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN // Duenio del estudio: ve y hace todo
+  SUPERVISOR // Ve todo, asigna y revisa, no administra usuarios
+  CONTADOR // Ve su cartera de clientes y sus tareas
+  ASISTENTE // Solo sus tareas asignadas
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum TaxRegime {
+  NRUS // Nuevo Regimen Unico Simplificado
+  RER // Regimen Especial de Renta
+  MYPE // Regimen MYPE Tributario
+  GENERAL // Regimen General
+}
+
+enum ClientStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum TaskCategory {
+  DECLARACION // PDT / declaraciones mensuales
+  LIBRO // Libros contables / PLE
+  PLANILLA // Planillas y PLAME
+  TRAMITE // Tramites SUNAT
+  REPORTE // Reportes internos / al cliente
+  OTRO
+}
+
+enum TaskStatus {
+  PENDIENTE
+  EN_PROCESO
+  EN_REVISION
+  TERMINADA
+}
+
+enum TaskPriority {
+  BAJA
+  MEDIA
+  ALTA
+  URGENTE
+}
+
+enum Recurrence {
+  MENSUAL
+  TRIMESTRAL
+  ANUAL
+  UNICA
+}
+
+// Como se calcula la fecha limite de una tarea generada por plantilla.
+enum DueDateRule {
+  SUNAT_MONTHLY // Cronograma SUNAT segun ultimo digito de RUC
+  DAY_OF_MONTH // Dia fijo del mes siguiente al periodo
+  FIXED_DATE // Fecha fija (solo para recurrencia UNICA)
+}
+
+enum NotificationType {
+  TAREA_ASIGNADA
+  TAREA_POR_VENCER
+  TAREA_VENCIDA
+  TAREA_EN_REVISION
+  TAREA_DEVUELTA
+  SISTEMA
+}
+
+// ---------------------------------------------------------------------------
+// Personal
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  fullName     String
+  role         Role       @default(ASISTENTE)
+  status       UserStatus @default(ACTIVE)
+  phone        String?
+  // Capacidad declarada: tareas simultaneas que el trabajador puede sostener.
+  // Alimenta el indicador de sobrecarga del dashboard.
+  capacity     Int        @default(40)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  managedClients Client[]           @relation("ClientAccountant")
+  assignedTasks  Task[]             @relation("TaskAssignee")
+  createdTasks   Task[]             @relation("TaskCreator")
+  statusChanges  TaskStatusChange[]
+  comments       TaskComment[]
+  notifications  Notification[]
+  auditLogs      AuditLog[]
+  snapshots      ProductivitySnapshot[]
+
+  @@index([status, role])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Clientes (las empresas a las que el estudio les lleva la contabilidad)
+// ---------------------------------------------------------------------------
+
+model Client {
+  id          String       @id @default(cuid())
+  ruc         String       @unique @db.VarChar(11)
+  // Denormalizado a proposito: es el discriminante del cronograma SUNAT y se
+  // usa en cada generacion mensual. Se deriva del RUC en la capa de dominio.
+  rucLastDigit Int
+  businessName String
+  tradeName    String?
+  taxRegime    TaxRegime
+  status       ClientStatus @default(ACTIVE)
+
+  contactName  String?
+  contactEmail String?
+  contactPhone String?
+  address      String?
+
+  monthlyFee   Decimal?  @db.Decimal(12, 2)
+  serviceStart DateTime?
+  notes        String?
+
+  accountantId String?
+  accountant   User?   @relation("ClientAccountant", fields: [accountantId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks     Task[]
+  templates TaskTemplate[]
+  documents Document[]
+
+  // Listado principal: filtra por estado, ordena por nombre.
+  @@index([status, businessName])
+  // "Mi cartera" del contador.
+  @@index([accountantId, status])
+  @@index([rucLastDigit])
+  @@map("clients")
+}
+
+// ---------------------------------------------------------------------------
+// Plantillas de tareas recurrentes
+// ---------------------------------------------------------------------------
+
+// Una plantilla describe UNA obligacion periodica. El job mensual la expande
+// en una Tarea por cada cliente que corresponda.
+//   - clientId = null  -> plantilla global (aplica a todos los clientes que
+//                         cumplan el filtro de regimen)
+//   - clientId != null -> plantilla exclusiva de ese cliente
+model TaskTemplate {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  category    TaskCategory
+  recurrence  Recurrence   @default(MENSUAL)
+  priority    TaskPriority @default(MEDIA)
+  active      Boolean      @default(true)
+
+  dueDateRule DueDateRule @default(SUNAT_MONTHLY)
+  // Para DAY_OF_MONTH: dia del mes siguiente al periodo (1-31, se recorta al
+  // ultimo dia valido del mes). Ignorado por las otras reglas.
+  dueDayOfMonth Int?
+  // Para FIXED_DATE.
+  fixedDueDate  DateTime?
+
+  // Filtro por regimen: vacio = aplica a todos los regimenes.
+  appliesToRegimes TaxRegime[] @default([])
+
+  // Responsable por defecto: si es null, hereda el contador del cliente.
+  defaultAssigneeId String?
+
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks Task[]
+
+  @@index([active, recurrence])
+  @@index([clientId])
+  @@map("task_templates")
+}
+
+// ---------------------------------------------------------------------------
+// Tareas
+// ---------------------------------------------------------------------------
+
+model Task {
+  id          String       @id @default(cuid())
+  title       String
+  description String?
+  category    TaskCategory
+  status      TaskStatus   @default(PENDIENTE)
+  priority    TaskPriority @default(MEDIA)
+
+  // Periodo tributario "YYYY-MM". Null en tareas no periodicas.
+  period String? @db.VarChar(7)
+
+  dueDate     DateTime
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  assigneeId String?
+  assignee   User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  createdById String?
+  createdBy   User?   @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  templateId String?
+  template   TaskTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusChanges TaskStatusChange[]
+  comments      TaskComment[]
+  documents     Document[]
+
+  // Idempotencia del job mensual: una plantilla produce como maximo una tarea
+  // por cliente y periodo, sin importar cuantas veces se ejecute.
+  @@unique([clientId, templateId, period], name: "uniq_generated_task")
+  // "Mis tareas" ordenadas por vencimiento: el query mas frecuente de la app.
+  @@index([assigneeId, status, dueDate])
+  // Tablero de vencimientos y deteccion de atrasos.
+  @@index([status, dueDate])
+  // Ficha del cliente.
+  @@index([clientId, period])
+  // Reportes diarios: tareas cerradas en un rango.
+  @@index([completedAt])
+  @@map("tasks")
+}
+
+// Bitacora inmutable de cambios de estado. Es la fuente de verdad del
+// "avance diario" y de cualquier auditoria posterior.
+model TaskStatusChange {
+  id   String      @id @default(cuid())
+  from TaskStatus?
+  to   TaskStatus
+  note String?
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId, createdAt])
+  // Productividad por trabajador en un rango de fechas.
+  @@index([userId, createdAt])
+  @@map("task_status_changes")
+}
+
+model TaskComment {
+  id   String @id @default(cuid())
+  body String
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  authorId String?
+  author   User?   @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId, createdAt])
+  @@map("task_comments")
+}
+
+// ---------------------------------------------------------------------------
+// Cronograma SUNAT
+// ---------------------------------------------------------------------------
+
+// Se carga una vez al anio desde la resolucion de superintendencia.
+// `period` es el periodo tributario declarado (no el mes de vencimiento).
+model SunatDueDate {
+  id        String   @id @default(cuid())
+  period    String   @db.VarChar(7)
+  lastDigit Int
+  dueDate   DateTime
+
+  createdAt DateTime @default(now())
+
+  @@unique([period, lastDigit])
+  @@index([period])
+  @@map("sunat_due_dates")
+}
+
+// ---------------------------------------------------------------------------
+// Notificaciones (in-app)
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id      String           @id @default(cuid())
+  type    NotificationType
+  title   String
+  body    String?
+  // Deep link dentro de la app, p.ej. "/tareas/abc123".
+  link    String?
+  readAt  DateTime?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Clave de deduplicacion: evita reenviar la misma alerta cada vez que corre
+  // el job. Ej: "due-soon:<taskId>:5d".
+  dedupeKey String? @unique
+
+  createdAt DateTime @default(now())
+
+  // Bandeja del usuario: no leidas primero, mas recientes arriba.
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Documentos
+// ---------------------------------------------------------------------------
+
+model Document {
+  id          String  @id @default(cuid())
+  fileName    String
+  storageKey  String // clave en S3/compatible
+  mimeType    String
+  sizeBytes   Int
+  period      String? @db.VarChar(7)
+  description String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  taskId String?
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  uploadedById String?
+  createdAt    DateTime @default(now())
+
+  @@index([clientId, period])
+  @@index([taskId])
+  @@map("documents")
+}
+
+// ---------------------------------------------------------------------------
+// Auditoria
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id       String  @id @default(cuid())
+  action   String // "client.create", "task.status_change", ...
+  entity   String // "Client", "Task", ...
+  entityId String
+  // Diff o payload relevante. Json permite consultar por campo en Postgres.
+  metadata Json?
+  ip       String?
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId, createdAt])
+  @@index([userId, createdAt])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Precalculo de KPIs
+// ---------------------------------------------------------------------------
+
+// Con 200+ clientes el dashboard no puede recalcular COUNT sobre millones de
+// filas en cada carga. El job diario consolida aqui el avance por trabajador.
+model ProductivitySnapshot {
+  id   String   @id @default(cuid())
+  date DateTime @db.Date
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  assignedCount  Int @default(0)
+  completedCount Int @default(0)
+  overdueCount   Int @default(0)
+  // Porcentaje 0-100 redondeado, listo para pintar sin calcular en el cliente.
+  progressPct    Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@unique([date, userId])
+  @@index([date])
+  @@map("productivity_snapshots")
+}

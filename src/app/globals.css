@@ -1,0 +1,196 @@
+@import 'tailwindcss';
+
+/**
+ * Tokens de diseno.
+ *
+ * Todo el color se define como variable y se redefine para modo oscuro en UN
+ * solo lugar. Ningun componente escribe un hex: si el estudio quiere cambiar
+ * su color corporativo, se toca este archivo y nada mas.
+ *
+ * El modo oscuro se declara en dos ambitos: la media query cubre la
+ * preferencia del sistema operativo, y [data-theme] cubre el interruptor
+ * manual, que debe ganar en ambos sentidos.
+ */
+
+:root {
+  color-scheme: light;
+
+  --surface-0: #f6f7f9; /* fondo de la app */
+  --surface-1: #ffffff; /* tarjetas */
+  --surface-2: #f0f2f5; /* zonas hundidas, cabeceras de tabla */
+  --border: #dfe3e8;
+  --border-strong: #c3cad3;
+
+  --text-primary: #0f1b2d;
+  --text-secondary: #4a5668;
+  --text-muted: #7b8798;
+  --text-inverse: #ffffff;
+
+  --brand: #123a6b;
+  --brand-hover: #0d2c53;
+  --brand-soft: #e8eef7;
+  --accent: #2a78d6;
+
+  --focus-ring: #2a78d6;
+
+  /* Estado (paleta reservada: nunca se reutiliza para "serie 4") */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  /**
+   * Serie del grafico de estados.
+   *
+   * El ORDEN es el mecanismo de seguridad para daltonismo, no una decision
+   * estetica: en una dona el ultimo segmento toca al primero, asi que el par
+   * del cierre tambien se valido. Este orden concreto pasa las seis
+   * comprobaciones (banda de luminosidad, croma, separacion CVD, piso de
+   * vision normal y contraste) en claro y en oscuro, incluido el par de
+   * cierre rojo<->azul. Reordenar los segmentos invalida esa garantia:
+   * si se cambia, hay que volver a correr el validador.
+   */
+  --series-proceso: #2a78d6;
+  --series-terminada: #0ca30c;
+  --series-revision: #e87ba4;
+  --series-pendiente: #eda100;
+  --series-atrasada: #d03b3b;
+
+  --radius: 10px;
+  --shadow-sm: 0 1px 2px rgb(15 27 45 / 0.06);
+  --shadow-md: 0 4px 16px rgb(15 27 45 / 0.08);
+}
+
+/* Modo oscuro por preferencia del sistema. El :not() deja que un tema claro
+   explicito gane sobre el ajuste del SO. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --surface-0: #12151a;
+    --surface-1: #1a1e25;
+    --surface-2: #232830;
+    --border: #2f353f;
+    --border-strong: #3d444f;
+
+    --text-primary: #f2f4f7;
+    --text-secondary: #b9c1cc;
+    --text-muted: #8a94a2;
+    --text-inverse: #12151a;
+
+    --brand: #3987e5;
+    --brand-hover: #5598e7;
+    --brand-soft: #1c2b40;
+    --accent: #3987e5;
+
+    /* Los pasos oscuros se eligieron para la superficie oscura y se validaron
+       como conjunto: no son un "volteo" automatico de los claros. */
+    --series-proceso: #3987e5;
+    --series-terminada: #0ca30c;
+    --series-revision: #d55181;
+    --series-pendiente: #c98500;
+    --series-atrasada: #d03b3b;
+
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-md: 0 4px 16px rgb(0 0 0 / 0.5);
+  }
+}
+
+/* Interruptor manual: gana sobre el ajuste del sistema. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface-0: #12151a;
+  --surface-1: #1a1e25;
+  --surface-2: #232830;
+  --border: #2f353f;
+  --border-strong: #3d444f;
+
+  --text-primary: #f2f4f7;
+  --text-secondary: #b9c1cc;
+  --text-muted: #8a94a2;
+  --text-inverse: #12151a;
+
+  --brand: #3987e5;
+  --brand-hover: #5598e7;
+  --brand-soft: #1c2b40;
+  --accent: #3987e5;
+
+  --series-proceso: #3987e5;
+  --series-terminada: #0ca30c;
+  --series-revision: #d55181;
+  --series-pendiente: #c98500;
+  --series-atrasada: #d03b3b;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 4px 16px rgb(0 0 0 / 0.5);
+}
+
+@theme inline {
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-ink: var(--text-primary);
+  --color-ink-2: var(--text-secondary);
+  --color-ink-3: var(--text-muted);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-soft: var(--brand-soft);
+  --color-accent: var(--accent);
+  --color-good: var(--status-good);
+  --color-warning: var(--status-warning);
+  --color-serious: var(--status-serious);
+  --color-critical: var(--status-critical);
+  --radius-card: var(--radius);
+}
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Foco visible y consistente en toda la app. Quitar el outline sin
+   reemplazarlo deja la app inusable con teclado. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respeta a quien pidio menos movimiento en su sistema. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Utilidad: visible solo para lectores de pantalla. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
