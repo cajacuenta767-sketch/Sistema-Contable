@@ -43,7 +43,8 @@ Ver [Alcance](#alcance-de-esta-versión) para lo que el sistema **no** hace.
 | Aportes del empleador: EsSalud y SCTR | ✅ |
 | Boleta con el detalle completo del cálculo | ✅ |
 | Cierre y reapertura de planilla | ✅ |
-| Archivo PLAME | ⬜ Pendiente |
+| Asiento de provision de planilla (conecta con contabilidad) | ✅ |
+| Archivos de importacion del PDT PLAME | ✅ |
 
 ---
 
@@ -237,8 +238,10 @@ pasen vencimientos.
    ajustes por ingresos extraordinarios del artículo 41 del reglamento. Para un
    trabajador con bonos variables altos, revise el último trimestre.
 
-7. **Falta el archivo PLAME.** La planilla se calcula completa, pero la
-   generación del archivo para el PDT PLAME no está implementada.
+7. **El PLAME se importa al PDT, no se presenta desde aquí.** El sistema genera
+   los archivos de importación para evitar digitar trabajador por trabajador;
+   la declaración se presenta desde el PDT PLAME. Sus estructuras también
+   cambian por versión del PDT y deben verificarse.
 
 8. **Las fechas estimadas del cronograma no son oficiales.** Ver
    [Carga del cronograma SUNAT](#carga-del-cronograma-sunat).

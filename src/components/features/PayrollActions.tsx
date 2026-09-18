@@ -55,8 +55,16 @@ export function PayrollActions({
     if (!runId) return
     setLoading(true)
     try {
-      await api.post(`/api/payroll/runs/${runId}/close`)
-      toast.push('Planilla cerrada', 'success')
+      const result = await api.post<{ entry: { number: number } | null; warnings: string[] }>(
+        `/api/payroll/runs/${runId}/close`,
+      )
+      toast.push(
+        result.entry
+          ? `Planilla cerrada. Asiento de provision ${result.entry.number} generado en borrador.`
+          : 'Planilla cerrada',
+        'success',
+      )
+      for (const warning of result.warnings ?? []) toast.push(warning, 'error')
       router.refresh()
     } catch (error) {
       toast.push(error instanceof ApiError ? error.message : 'No se pudo cerrar', 'error')

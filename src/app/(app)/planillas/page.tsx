@@ -12,6 +12,7 @@ import { ClientPeriodSelector } from '@/components/features/ClientPeriodSelector
 import { PayrollActions } from '@/components/features/PayrollActions'
 import { NewEmployeeButton } from '@/components/features/NewEmployeeButton'
 import { PayslipModal } from '@/components/features/PayslipModal'
+import { PlameGeneratorButtons } from '@/components/features/PlameGeneratorButtons'
 import { formatDate, periodLabel } from '@/lib/format'
 
 export const metadata: Metadata = { title: 'Planillas' }
@@ -179,6 +180,20 @@ export default async function PayrollPage({
           />
         </Card>
       )}
+
+      <Card as="div">
+        <CardHeader
+          title="PDT PLAME"
+          subtitle="Archivos de importacion de la planilla mensual electronica"
+        />
+        <CardBody>
+          <PlameGeneratorButtons
+            clientId={context.clientId}
+            period={context.period}
+            disabled={!run}
+          />
+        </CardBody>
+      </Card>
 
       <Card as="div">
         <CardHeader title="Trabajadores" subtitle={`${employees.length} vigentes`} />

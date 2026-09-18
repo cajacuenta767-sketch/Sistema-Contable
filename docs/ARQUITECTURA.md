@@ -376,6 +376,39 @@ neto no se puede defender.
 - **Un contrato de locación de servicios no entra en la planilla**: sus
   honorarios son renta de cuarta categoría.
 
+### El asiento que conecta los dos módulos
+
+Al cerrar la planilla se genera su **asiento de provisión**. Sin él, el gasto de
+personal no aparece en el Estado de Resultados y las retenciones no figuran como
+deuda en el balance, aunque la planilla esté calculada al céntimo.
+
+```
+DEBE   62 Gastos de personal + EsSalud + SCTR   (bruto + aportes del empleador)
+HABER  4031 EsSalud · 4032 ONP · 4071 AFP · 40173 Renta 5ta
+       469 Otros · 4111 Sueldos por pagar        (misma cifra, descompuesta)
+```
+
+Cuadra por construcción y aun así se valida. Se genera **al cerrar**, no al
+calcular: mientras la planilla es un borrador que se recalcula, un asiento por
+cada intento ensuciaría el libro. Nace en borrador, como los que vienen de
+comprobantes: confirmarlo es decisión del contador.
+
+Los aportes se separan por sistema previsional porque van a cuentas distintas: lo
+retenido a un afiliado a ONP se debe a la ONP y lo de AFP a su administradora.
+Agruparlos haría imposible conciliar cualquiera de los dos pagos.
+
+### PLAME
+
+Mismo enfoque que el PLE: estructuras y códigos de concepto como datos en
+`plame/layout.ts`, formato de texto con separador `|`, cierre de línea con `|`,
+CRLF y Latin-1.
+
+El código de concepto define cómo SUNAT trata cada importe —si es base de
+aportes, si es renta de quinta, si es descuento—, así que el sistema previsional
+del trabajador decide el código: lo retenido a un afiliado a ONP va con `0601` y
+lo de AFP con `0605`/`0606`/`0607`. Codificarlo mal produce una declaración con
+bases equivocadas. Hay tests para ambos casos.
+
 ---
 
 ## 11. Índices añadidos en las fases 2 y 3

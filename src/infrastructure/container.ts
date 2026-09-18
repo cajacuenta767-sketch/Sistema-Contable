@@ -113,7 +113,17 @@ function build() {
       audit,
       clock,
     ),
-    payroll: new PayrollUseCases(employees, payrollRuns, taxParameters, pensionRates, audit),
+    payroll: new PayrollUseCases(
+      employees,
+      payrollRuns,
+      taxParameters,
+      pensionRates,
+      journal,
+      accounts,
+      accountingPeriods,
+      clients,
+      audit,
+    ),
     users: new UserUseCases(users, hasher, audit),
     /**
      * Actor al que se atribuyen las acciones de los jobs automaticos.

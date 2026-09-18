@@ -4,6 +4,8 @@ import type { AuthenticatedUser } from '@/core/domain/types'
 import { Money } from '@/core/domain/value-objects/money'
 import { TaxPeriod } from '@/core/domain/value-objects/tax-period'
 import { PayslipService } from '@/core/domain/payroll/payslip'
+import { PayrollEntryService } from '@/core/domain/payroll/payroll-entry'
+import { PlameGenerator, type PlameExport } from '@/core/domain/payroll/plame/generator'
 import type { PayrollParameters, PensionParameters } from '@/core/domain/payroll/parameters'
 import type {
   CreateEmployeeInput,
@@ -15,7 +17,13 @@ import type {
   PensionRateRepository,
   TaxParameterRepository,
 } from '../ports/payroll'
-import type { AuditLogRepository } from '../ports'
+import type { AuditLogRepository, ClientRepository } from '../ports'
+import type {
+  AccountRepository,
+  AccountingPeriodRepository,
+  JournalEntryRecord,
+  JournalRepository,
+} from '../ports/accounting'
 
 /**
  * Casos de uso de planillas.
@@ -46,6 +54,10 @@ export class PayrollUseCases {
     private readonly runs: PayrollRunRepository,
     private readonly parameters: TaxParameterRepository,
     private readonly pensionRates: PensionRateRepository,
+    private readonly journal: JournalRepository,
+    private readonly accounts: AccountRepository,
+    private readonly periods: AccountingPeriodRepository,
+    private readonly clients: ClientRepository,
     private readonly audit: AuditLogRepository,
   ) {}
 
@@ -298,7 +310,24 @@ export class PayrollUseCases {
     return { run, warnings }
   }
 
-  async closeRun(user: AuthenticatedUser, runId: string): Promise<PayrollRunRecord> {
+  /**
+   * Cierra la planilla y genera su asiento de provision.
+   *
+   * El asiento se genera AL CERRAR y no al calcular: mientras la planilla es
+   * un borrador que se recalcula, un asiento contable por cada intento
+   * ensuciaria el libro. El cierre es el momento en que las cifras se dan por
+   * definitivas.
+   *
+   * El asiento nace en BORRADOR: el contador decide cuando confirmarlo, igual
+   * que con los asientos que vienen de comprobantes.
+   *
+   * Si el asiento falla, la planilla YA quedo cerrada: no se pierde el trabajo
+   * y el asiento puede hacerse a mano. Se informa en la respuesta.
+   */
+  async closeRun(
+    user: AuthenticatedUser,
+    runId: string,
+  ): Promise<{ run: PayrollRunRecord; entry: JournalEntryRecord | null; warnings: string[] }> {
     Permissions.assert(user, 'client:write')
 
     const run = await this.runs.findById(runId)
@@ -309,16 +338,120 @@ export class PayrollUseCases {
     }
 
     const closed = await this.runs.close(runId, user.id)
+    const warnings: string[] = []
+
+    let entry: JournalEntryRecord | null = null
+    try {
+      entry = await this.buildPayrollEntry(user, closed)
+    } catch (error) {
+      warnings.push(
+        `La planilla se cerro, pero no se pudo generar su asiento de provision: ${
+          error instanceof Error ? error.message : 'error desconocido'
+        }. Registrelo manualmente.`,
+      )
+    }
 
     await this.audit.record({
       action: 'payroll.close',
       entity: 'PayrollRun',
       entityId: runId,
       userId: user.id,
-      metadata: { period: run.period, totalNet: run.totalNet.toString() },
+      metadata: {
+        period: run.period,
+        totalNet: run.totalNet.toString(),
+        entryId: entry?.id ?? null,
+      },
     })
 
-    return closed
+    return { run: closed, entry, warnings }
+  }
+
+  /**
+   * Arma el asiento de provision a partir de los totales de la planilla.
+   *
+   * Los aportes se separan por sistema previsional porque van a cuentas
+   * distintas: lo retenido a un afiliado a ONP se debe a la ONP, y lo retenido
+   * a uno de AFP a su administradora. Agruparlos haria imposible conciliar
+   * cualquiera de los dos pagos.
+   */
+  private async buildPayrollEntry(
+    user: AuthenticatedUser,
+    run: PayrollRunRecord,
+  ): Promise<JournalEntryRecord> {
+    const period = await this.periods.find(run.clientId, run.period)
+    if (period?.status === 'CERRADO') {
+      throw new ConflictError(
+        `El periodo contable ${run.period} esta cerrado: no admite el asiento de planilla.`,
+      )
+    }
+
+    const employees = await this.employees.list(run.clientId, true)
+    const systemById = new Map(employees.map((e) => [e.id, e.pensionSystem]))
+
+    const zero = Money.zero()
+    const totals = {
+      gross: zero,
+      onpContributions: zero,
+      afpContributions: zero,
+      incomeTax: zero,
+      otherDeductions: zero,
+      netPay: zero,
+      employerEssalud: zero,
+      employerSctr: zero,
+    }
+
+    for (const item of run.items) {
+      const pensionTotal = item.pensionContribution
+        .add(item.pensionCommission)
+        .add(item.pensionInsurance)
+
+      totals.gross = totals.gross.add(item.grossPay)
+      totals.incomeTax = totals.incomeTax.add(item.incomeTax5th)
+      totals.otherDeductions = totals.otherDeductions.add(item.otherDeductions)
+      totals.netPay = totals.netPay.add(item.netPay)
+      totals.employerEssalud = totals.employerEssalud.add(item.employerEssalud)
+      totals.employerSctr = totals.employerSctr.add(item.employerSctr)
+
+      if (systemById.get(item.employeeId) === 'AFP') {
+        totals.afpContributions = totals.afpContributions.add(pensionTotal)
+      } else {
+        totals.onpContributions = totals.onpContributions.add(pensionTotal)
+      }
+    }
+
+    const taxPeriod = TaxPeriod.create(run.period)
+    const draft = PayrollEntryService.build(totals, {
+      // Ultimo dia del periodo: es la fecha contable de la provision.
+      date: new Date(Date.UTC(taxPeriod.year, taxPeriod.month, 0, 12)),
+      period: run.period,
+      periodLabel: taxPeriod.label(),
+    })
+
+    const chart = await this.accounts.chartFor(run.clientId)
+    const names = new Map(chart.map((a) => [a.code, a.name]))
+
+    return this.journal.create({
+      clientId: run.clientId,
+      date: draft.date,
+      period: draft.period,
+      glossa: draft.glossa,
+      source: 'AUTOMATICO',
+      status: 'BORRADOR',
+      createdById: user.id,
+      lines: draft.lines.map((line, index) => ({
+        order: index + 1,
+        accountCode: line.accountCode,
+        accountName: names.get(line.accountCode) ?? line.accountCode,
+        debit: line.debit,
+        credit: line.credit,
+        glossa: draft.glossa,
+        counterpartyDocType: null,
+        counterpartyDocNumber: null,
+        docType: null,
+        serie: null,
+        docNumber: null,
+      })),
+    })
   }
 
   /**
@@ -346,6 +479,78 @@ export class PayrollUseCases {
     })
 
     return reopened
+  }
+
+  /**
+   * Archivos de importacion del PDT PLAME.
+   *
+   * Se generan desde la planilla ya calculada. El PDT sigue siendo el que
+   * presenta la declaracion: estos archivos solo evitan digitar trabajador por
+   * trabajador, que con veinte empleados son varias horas y varios errores.
+   */
+  async generatePlame(
+    user: AuthenticatedUser,
+    clientId: string,
+    period: string,
+  ): Promise<PlameExport> {
+    Permissions.assert(user, 'client:write')
+
+    const client = await this.clients.findById(clientId)
+    if (!client) throw new NotFoundError('el cliente', clientId)
+
+    const run = await this.runs.find(clientId, period)
+    if (!run) {
+      throw new NotFoundError('la planilla del periodo', period)
+    }
+
+    const employees = await this.employees.list(clientId, true)
+    const byId = new Map(employees.map((e) => [e.id, e]))
+
+    const rows = run.items.flatMap((item) => {
+      const employee = byId.get(item.employeeId)
+      // Un trabajador borrado deja su boleta huerfana: se omite del archivo
+      // en vez de generar una linea sin documento, que el PDT rechazaria.
+      if (!employee) return []
+
+      return [
+        {
+          docType: employee.docType.padStart(2, '0'),
+          docNumber: employee.docNumber,
+          fullName: employee.fullName,
+          pensionSystem: employee.pensionSystem,
+          workedDays: item.workedDays,
+          absentDays: item.absentDays,
+          overtimeHours: item.overtimeHours,
+          basicPay: item.basicPay,
+          familyAllowance: item.familyAllowance,
+          overtimePay: item.overtimePay,
+          bonuses: item.bonuses,
+          pensionContribution: item.pensionContribution,
+          pensionCommission: item.pensionCommission,
+          pensionInsurance: item.pensionInsurance,
+          incomeTax5th: item.incomeTax5th,
+          otherDeductions: item.otherDeductions,
+          employerEssalud: item.employerEssalud,
+          employerSctr: item.employerSctr,
+        },
+      ]
+    })
+
+    const result = PlameGenerator.generate({ ruc: client.ruc, period, employees: rows })
+
+    await this.audit.record({
+      action: 'plame.generate',
+      entity: 'PayrollRun',
+      entityId: run.id,
+      userId: user.id,
+      metadata: {
+        clientId,
+        period,
+        files: result.files.map((f) => ({ name: f.fileName, lines: f.lineCount })),
+      },
+    })
+
+    return result
   }
 
   /** Boleta individual, con el detalle del calculo para poder sustentarla. */

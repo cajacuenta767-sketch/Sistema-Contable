@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { Money } from '@/core/domain/value-objects/money'
 import { PayslipService } from '@/core/domain/payroll/payslip'
 import type { PayrollParameters, PensionParameters } from '@/core/domain/payroll/parameters'
+import { PayrollEntryService } from '@/core/domain/payroll/payroll-entry'
+import { JournalService } from '@/core/domain/accounting/journal'
+import { PlameGenerator } from '@/core/domain/payroll/plame/generator'
 
 /**
  * Los parametros son de referencia y sirven para probar la MECANICA del
@@ -320,5 +323,153 @@ describe('precision del calculo', () => {
       parameters: PARAMS,
     })
     expect(result.earnings.basicPay.toString()).toBe('1888.89')
+  })
+})
+
+describe('Asiento de provision de planilla', () => {
+  const totals = {
+    gross: Money.fromString('14426.00'),
+    onpContributions: Money.fromString('195.00'),
+    afpContributions: Money.fromString('1723.09'),
+    incomeTax: Money.fromString('2373.61'),
+    otherDeductions: Money.zero(),
+    netPay: Money.fromString('10134.30'),
+    employerEssalud: Money.fromString('1275.39'),
+    employerSctr: Money.fromString('45.90'),
+  }
+  const context = { date: new Date('2026-08-31T12:00:00Z'), period: '2026-08', periodLabel: 'Agosto 2026' }
+
+  it('carga el gasto de personal y los aportes del empleador', () => {
+    const asiento = PayrollEntryService.build(totals, context)
+    const debe = asiento.lines.filter((l) => !l.debit.isZero())
+    expect(debe.map((l) => l.accountCode)).toEqual(['6211', '6271', '6274'])
+    expect(debe[0]?.debit.toString()).toBe('14426.00')
+  })
+
+  it('abona lo retenido, lo aportado y el neto por separado', () => {
+    const asiento = PayrollEntryService.build(totals, context)
+    const haber = new Map(
+      asiento.lines.filter((l) => !l.credit.isZero()).map((l) => [l.accountCode, l.credit.toString()]),
+    )
+    expect(haber.get('4032')).toBe('195.00') // ONP
+    expect(haber.get('4071')).toBe('1723.09') // AFP
+    expect(haber.get('40173')).toBe('2373.61') // renta de quinta
+    expect(haber.get('4111')).toBe('10134.30') // neto a depositar
+  })
+
+  it('cuadra: el debe es bruto mas aportes del empleador', () => {
+    const asiento = PayrollEntryService.build(totals, context)
+    const sumas = JournalService.totals(asiento.lines)
+    expect(sumas.balanced).toBe(true)
+    // 14426.00 + 1275.39 + 45.90
+    expect(sumas.debit.toString()).toBe('15747.29')
+  })
+
+  it('omite las lineas en cero', () => {
+    // Una empresa sin afiliados a AFP no debe tener una linea de AFP en cero.
+    const sinAfp = PayrollEntryService.build(
+      {
+        ...totals,
+        afpContributions: Money.zero(),
+        // Se rebalancea moviendo esa retencion al neto.
+        netPay: totals.netPay.add(totals.afpContributions),
+      },
+      context,
+    )
+    expect(sinAfp.lines.some((l) => l.accountCode === '4071')).toBe(false)
+    expect(JournalService.totals(sinAfp.lines).balanced).toBe(true)
+  })
+
+  it('permite cambiar las cuentas sin tocar el codigo', () => {
+    const asiento = PayrollEntryService.build(totals, context, { salaryExpense: '6212' })
+    expect(asiento.lines[0]?.accountCode).toBe('6212')
+  })
+})
+
+describe('Generacion PLAME', () => {
+  const trabajador = {
+    docType: '01',
+    docNumber: '41000000',
+    fullName: 'Rosa Huaman Vega',
+    pensionSystem: 'AFP' as const,
+    workedDays: 30,
+    absentDays: 0,
+    overtimeHours: 0,
+    basicPay: Money.fromString('4200.00'),
+    familyAllowance: Money.fromString('113.00'),
+    overtimePay: Money.zero(),
+    bonuses: Money.zero(),
+    pensionContribution: Money.fromString('431.30'),
+    pensionCommission: Money.fromString('66.85'),
+    pensionInsurance: Money.fromString('75.05'),
+    incomeTax5th: Money.fromString('366.91'),
+    otherDeductions: Money.zero(),
+    employerEssalud: Money.fromString('388.17'),
+    employerSctr: Money.zero(),
+  }
+
+  const base = { ruc: '20100070970', period: '2026-08', employees: [trabajador] }
+
+  it('genera los dos archivos con la nomenclatura del PDT', () => {
+    const result = PlameGenerator.generate(base)
+    expect(result.files.map((f) => f.fileName)).toEqual([
+      '060120100070970202608.jor',
+      '060120100070970202608.rem',
+    ])
+  })
+
+  it('la jornada lleva dias y horas ordinarias derivadas', () => {
+    const jornada = PlameGenerator.generate(base).files[0]!
+    // 30 dias x 8 horas = 240
+    expect(jornada.content.trim()).toBe('01|41000000|30|0|0|240.00|0.00|')
+  })
+
+  it('usa los codigos de AFP para un afiliado a AFP', () => {
+    const conceptos = PlameGenerator.generate(base).files[1]!
+    expect(conceptos.content).toContain('|0605|431.30|') // aporte obligatorio
+    expect(conceptos.content).toContain('|0606|66.85|') // comision
+    expect(conceptos.content).toContain('|0607|75.05|') // prima
+    expect(conceptos.content).not.toContain('|0601|') // no lleva codigo de ONP
+  })
+
+  it('usa el codigo de ONP para un afiliado a ONP', () => {
+    // Codificar lo retenido a un afiliado a ONP con el codigo de AFP produce
+    // una declaracion con bases equivocadas.
+    const conceptos = PlameGenerator.generate({
+      ...base,
+      employees: [{ ...trabajador, pensionSystem: 'ONP' as const }],
+    }).files[1]!
+    expect(conceptos.content).toContain('|0601|431.30|')
+    expect(conceptos.content).not.toContain('|0605|')
+  })
+
+  it('omite los conceptos en cero', () => {
+    const conceptos = PlameGenerator.generate(base).files[1]!
+    // No hay horas extras ni SCTR: esos codigos no deben aparecer.
+    expect(conceptos.content).not.toContain('|0302|')
+    expect(conceptos.content).not.toContain('|0806|')
+  })
+
+  it('cierra cada linea con el separador y usa CRLF', () => {
+    const conceptos = PlameGenerator.generate(base).files[1]!
+    const lineas = conceptos.content.split('\r\n').filter(Boolean)
+    expect(lineas.every((l) => l.endsWith('|'))).toBe(true)
+    expect(conceptos.content).toContain('\r\n')
+  })
+
+  it('advierte sobre la version de la estructura y sobre quien presenta', () => {
+    const result = PlameGenerator.generate(base)
+    expect(result.warnings.some((w) => w.includes('PDT PLAME'))).toBe(true)
+    expect(result.warnings.some((w) => w.includes('no presenta ante SUNAT'))).toBe(true)
+  })
+
+  it('genera archivos vacios y avisa cuando no hay trabajadores', () => {
+    const result = PlameGenerator.generate({ ...base, employees: [] })
+    expect(result.files.every((f) => f.content === '')).toBe(true)
+    expect(result.warnings.some((w) => w.includes('sin trabajadores'))).toBe(true)
+  })
+
+  it('rechaza un RUC invalido', () => {
+    expect(() => PlameGenerator.generate({ ...base, ruc: '123' })).toThrow(/RUC invalido/)
   })
 })
