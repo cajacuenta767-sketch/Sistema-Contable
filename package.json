@@ -19,7 +19,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "jobs:generate-tasks": "tsx scripts/generate-monthly-tasks.ts",
-    "demo:activity": "tsx scripts/seed-demo-activity.ts"
+    "demo:activity": "tsx scripts/seed-demo-activity.ts",
+    "db:seed:accounting": "tsx prisma/seed-accounting.ts",
+    "demo:accounting": "tsx scripts/demo-accounting.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

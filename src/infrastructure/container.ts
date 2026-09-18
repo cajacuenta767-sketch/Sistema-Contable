@@ -8,6 +8,20 @@ import { PrismaMetricsRepository } from './repositories/prisma-metrics.repositor
 import { PrismaTaskRepository } from './repositories/prisma-task.repository'
 import { PrismaUserRepository } from './repositories/prisma-user.repository'
 import {
+  PrismaAccountRepository,
+  PrismaAccountingPeriodRepository,
+  PrismaJournalRepository,
+  PrismaPleExportRepository,
+  PrismaTaxDocumentRepository,
+  PrismaTaxReturnRepository,
+} from './repositories/prisma-accounting.repositories'
+import {
+  PrismaEmployeeRepository,
+  PrismaPayrollRunRepository,
+  PrismaPensionRateRepository,
+  PrismaTaxParameterRepository,
+} from './repositories/prisma-payroll.repositories'
+import {
   PrismaAuditLogRepository,
   PrismaNotificationRepository,
   PrismaSunatScheduleRepository,
@@ -22,6 +36,9 @@ import { NotificationUseCases } from '@/core/application/use-cases/notifications
 import { TaskUseCases } from '@/core/application/use-cases/tasks'
 import { TemplateUseCases } from '@/core/application/use-cases/templates'
 import { UserUseCases } from '@/core/application/use-cases/users'
+import { AccountingUseCases } from '@/core/application/use-cases/accounting'
+import { AccountingReportsUseCases } from '@/core/application/use-cases/accounting-reports'
+import { PayrollUseCases } from '@/core/application/use-cases/payroll'
 
 /**
  * Raiz de composicion: el UNICO lugar donde se decide que implementacion
@@ -56,6 +73,20 @@ function build() {
   const audit = new PrismaAuditLogRepository(prisma)
   const metrics = new PrismaMetricsRepository(prisma)
 
+  // Fase 2 - contabilidad
+  const accounts = new PrismaAccountRepository(prisma)
+  const taxDocuments = new PrismaTaxDocumentRepository(prisma)
+  const journal = new PrismaJournalRepository(prisma)
+  const accountingPeriods = new PrismaAccountingPeriodRepository(prisma)
+  const taxReturns = new PrismaTaxReturnRepository(prisma)
+  const pleExports = new PrismaPleExportRepository(prisma)
+
+  // Fase 3 - planillas
+  const employees = new PrismaEmployeeRepository(prisma)
+  const payrollRuns = new PrismaPayrollRunRepository(prisma)
+  const taxParameters = new PrismaTaxParameterRepository(prisma)
+  const pensionRates = new PrismaPensionRateRepository(prisma)
+
   return {
     env,
     clock,
@@ -65,6 +96,24 @@ function build() {
     dashboard: new DashboardUseCases(metrics, tasks, clock),
     notifications: new NotificationUseCases(notifications),
     templates: new TemplateUseCases(templates, audit),
+    accounting: new AccountingUseCases(
+      accounts,
+      taxDocuments,
+      journal,
+      accountingPeriods,
+      audit,
+      clock,
+    ),
+    accountingReports: new AccountingReportsUseCases(
+      journal,
+      taxDocuments,
+      clients,
+      taxReturns,
+      pleExports,
+      audit,
+      clock,
+    ),
+    payroll: new PayrollUseCases(employees, payrollRuns, taxParameters, pensionRates, audit),
     users: new UserUseCases(users, hasher, audit),
     /**
      * Actor al que se atribuyen las acciones de los jobs automaticos.

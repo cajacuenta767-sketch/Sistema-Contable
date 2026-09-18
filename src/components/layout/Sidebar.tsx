@@ -4,7 +4,6 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
   createContext,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -95,6 +94,8 @@ const NAV: NavItem[] = [
   { href: '/', label: 'Inicio', icon: <IconHome /> },
   { href: '/clientes', label: 'Clientes', icon: <IconUsers /> },
   { href: '/tareas', label: 'Tareas', icon: <IconCheck /> },
+  { href: '/contabilidad', label: 'Contabilidad', icon: <IconBook /> },
+  { href: '/planillas', label: 'Planillas', icon: <IconPayroll /> },
   { href: '/personal', label: 'Personal', icon: <IconTeam />, requires: 'user:read' },
   { href: '/reportes', label: 'Reportes', icon: <IconChart /> },
 ]
@@ -235,6 +236,23 @@ function IconTeam() {
       <circle cx="6.5" cy="7" r="2.25" stroke="currentColor" strokeWidth="1.5" />
       <circle cx="13.5" cy="7" r="2.25" stroke="currentColor" strokeWidth="1.5" />
       <path d="M2.5 15.5c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5M11 12.3c2.9-.7 6.5.5 6.5 3.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+function IconBook() {
+  return (
+    <svg viewBox="0 0 20 20" className="size-5" fill="none">
+      <path d="M4 4.5A1.5 1.5 0 015.5 3H16v14H5.5A1.5 1.5 0 014 15.5v-11z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      <path d="M7 7h6M7 10h6M7 13h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+function IconPayroll() {
+  return (
+    <svg viewBox="0 0 20 20" className="size-5" fill="none">
+      <rect x="2.5" y="5" width="15" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="10" cy="10" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5 8v4M15 8v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   )
 }

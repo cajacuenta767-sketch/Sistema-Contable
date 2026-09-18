@@ -160,6 +160,18 @@ model Client {
   templates TaskTemplate[]
   documents Document[]
 
+  // Fase 2 - contabilidad
+  accounts          Account[]
+  taxDocuments      TaxDocument[]
+  journalEntries    JournalEntry[]
+  accountingPeriods AccountingPeriod[]
+  taxReturns        TaxReturn[]
+  pleExports        PleExport[]
+
+  // Fase 3 - planillas
+  employees   Employee[]
+  payrollRuns PayrollRun[]
+
   // Listado principal: filtra por estado, ordena por nombre.
   @@index([status, businessName])
   // "Mi cartera" del contador.
@@ -422,4 +434,521 @@ model ProductivitySnapshot {
   @@unique([date, userId])
   @@index([date])
   @@map("productivity_snapshots")
+}
+
+// ===========================================================================
+// FASE 2 - MOTOR CONTABLE
+// ===========================================================================
+//
+// Nota sobre los importes: TODOS usan Decimal, nunca Float. En contabilidad
+// un error de redondeo no es un detalle estetico: descuadra el libro y una
+// base imponible mal calculada es una declaracion mal presentada.
+// El dominio los maneja con el value object Money (BigInt en centimos); los
+// repositorios convierten Decimal <-> Money en la frontera.
+
+enum AccountNature {
+  DEUDORA
+  ACREEDORA
+}
+
+enum DocumentKind {
+  VENTA
+  COMPRA
+}
+
+enum DocumentStatus {
+  REGISTRADO
+  ANULADO
+}
+
+enum CurrencyCode {
+  PEN
+  USD
+}
+
+enum EntrySource {
+  AUTOMATICO // generado desde un comprobante
+  MANUAL
+  AJUSTE
+  APERTURA
+  CIERRE
+}
+
+enum EntryStatus {
+  BORRADOR
+  CONFIRMADO
+  EXTORNADO
+}
+
+enum PeriodStatus {
+  ABIERTO
+  CERRADO
+}
+
+enum TaxReturnStatus {
+  CALCULADO
+  PRESENTADO
+}
+
+// ---------------------------------------------------------------------------
+// Plan de cuentas
+// ---------------------------------------------------------------------------
+
+// clientId = null  -> catalogo maestro (PCGE 2019), compartido por todos.
+// clientId != null -> cuenta propia del cliente (sub-divisionarias).
+// Asi el PCGE se carga una sola vez y cada empresa agrega lo suyo encima.
+model Account {
+  id       String        @id @default(cuid())
+  code     String        @db.VarChar(10)
+  name     String
+  level    Int // largo del codigo: 1=elemento, 2=cuenta, 3=subcuenta...
+  element  String        @db.VarChar(1)
+  parent   String?       @db.VarChar(10)
+  nature   AccountNature
+  // Solo las cuentas de ultimo nivel reciben movimiento; las agrupadoras no.
+  isPosting Boolean      @default(false)
+  active   Boolean       @default(true)
+
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  lines JournalLine[]
+
+  @@unique([clientId, code])
+  @@index([clientId, code])
+  @@index([element])
+  @@map("accounts")
+}
+
+// ---------------------------------------------------------------------------
+// Comprobantes de pago
+// ---------------------------------------------------------------------------
+
+model TaxDocument {
+  id     String       @id @default(cuid())
+  kind   DocumentKind
+  status DocumentStatus @default(REGISTRADO)
+
+  // Catalogo 10 de SUNAT: 01 factura, 03 boleta, 07 nota de credito,
+  // 08 nota de debito, 14 recibo de servicios publicos...
+  docType String @db.VarChar(2)
+  serie   String @db.VarChar(20)
+  number  String @db.VarChar(20)
+
+  issueDate DateTime
+  dueDate   DateTime?
+  period    String    @db.VarChar(7)
+
+  // Contraparte: cliente en una venta, proveedor en una compra.
+  counterpartyDocType   String  @db.VarChar(1) // catalogo 6: 1 DNI, 6 RUC...
+  counterpartyDocNumber String  @db.VarChar(15)
+  counterpartyName      String
+
+  currency     CurrencyCode @default(PEN)
+  exchangeRate Decimal      @default(1) @db.Decimal(11, 3)
+
+  taxableBase      Decimal @default(0) @db.Decimal(15, 2)
+  exemptAmount     Decimal @default(0) @db.Decimal(15, 2)
+  unaffectedAmount Decimal @default(0) @db.Decimal(15, 2)
+  igv              Decimal @default(0) @db.Decimal(15, 2)
+  isc              Decimal @default(0) @db.Decimal(15, 2)
+  otherCharges     Decimal @default(0) @db.Decimal(15, 2)
+  total            Decimal @default(0) @db.Decimal(15, 2)
+
+  detractionRate   Decimal? @db.Decimal(7, 4)
+  detractionAmount Decimal? @db.Decimal(15, 2)
+  detractionDate   DateTime?
+  detractionNumber String?   @db.VarChar(20)
+
+  retentionAmount  Decimal? @db.Decimal(15, 2)
+  perceptionAmount Decimal? @db.Decimal(15, 2)
+
+  // Comprobante modificado, para notas de credito y debito.
+  refDocType   String?   @db.VarChar(2)
+  refSerie     String?   @db.VarChar(20)
+  refNumber    String?   @db.VarChar(20)
+  refIssueDate DateTime?
+
+  notes String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  entryId String?       @unique
+  entry   JournalEntry? @relation(fields: [entryId], references: [id], onDelete: SetNull)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Deduplicacion: el mismo comprobante no puede entrar dos veces, ni al
+  // digitarlo ni al importar el mismo archivo por segunda vez. La restriccion
+  // vive en la base porque una importacion puede correr en paralelo.
+  @@unique([clientId, kind, docType, serie, number], name: "uniq_document")
+  // Consulta principal: los comprobantes de un periodo para armar el libro.
+  @@index([clientId, period, kind])
+  @@index([clientId, issueDate])
+  @@index([counterpartyDocNumber])
+  @@map("tax_documents")
+}
+
+// ---------------------------------------------------------------------------
+// Asientos contables
+// ---------------------------------------------------------------------------
+
+model JournalEntry {
+  id     String      @id @default(cuid())
+  number Int // correlativo dentro del periodo
+  date   DateTime
+  period String      @db.VarChar(7)
+  glossa String
+  source EntrySource @default(MANUAL)
+  status EntryStatus @default(BORRADOR)
+
+  totalDebit  Decimal @default(0) @db.Decimal(15, 2)
+  totalCredit Decimal @default(0) @db.Decimal(15, 2)
+
+  // Asiento que extorna a este, y viceversa. Un asiento confirmado nunca se
+  // borra: se contrapone, y el rastro queda.
+  reversedById String? @unique
+  reversesId   String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  lines    JournalLine[]
+  document TaxDocument?
+
+  @@unique([clientId, period, number], name: "uniq_entry_number")
+  @@index([clientId, period, date])
+  @@index([clientId, status])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id     String @id @default(cuid())
+  order  Int // posicion dentro del asiento
+
+  accountCode String  @db.VarChar(10)
+  accountName String
+  debit       Decimal @default(0) @db.Decimal(15, 2)
+  credit      Decimal @default(0) @db.Decimal(15, 2)
+  glossa      String?
+
+  // Requeridos por el PLE en varias cuentas.
+  counterpartyDocType   String? @db.VarChar(2)
+  counterpartyDocNumber String? @db.VarChar(15)
+  docType               String? @db.VarChar(2)
+  serie                 String? @db.VarChar(20)
+  docNumber             String? @db.VarChar(20)
+
+  entryId String
+  entry   JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([entryId, order])
+  // Mayor y balance de comprobacion: sumas por cuenta.
+  @@index([accountCode])
+  @@map("journal_lines")
+}
+
+// ---------------------------------------------------------------------------
+// Cierre de periodo
+// ---------------------------------------------------------------------------
+
+// Un periodo cerrado no admite asientos nuevos ni modificaciones. Es lo que
+// impide que alguien "arregle" un mes ya declarado y descuadre la declaracion
+// presentada contra los libros.
+model AccountingPeriod {
+  id     String       @id @default(cuid())
+  period String       @db.VarChar(7)
+  status PeriodStatus @default(ABIERTO)
+
+  closedAt   DateTime?
+  closedById String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([clientId, period])
+  @@index([clientId, status])
+  @@map("accounting_periods")
+}
+
+// ---------------------------------------------------------------------------
+// Declaraciones
+// ---------------------------------------------------------------------------
+
+model TaxReturn {
+  id     String          @id @default(cuid())
+  period String          @db.VarChar(7)
+  status TaxReturnStatus @default(CALCULADO)
+
+  salesBase     Decimal @default(0) @db.Decimal(15, 2)
+  salesIgv      Decimal @default(0) @db.Decimal(15, 2)
+  purchasesBase Decimal @default(0) @db.Decimal(15, 2)
+  purchasesIgv  Decimal @default(0) @db.Decimal(15, 2)
+  // Credito fiscal del periodo anterior que se arrastra.
+  previousCredit Decimal @default(0) @db.Decimal(15, 2)
+  igvToPay       Decimal @default(0) @db.Decimal(15, 2)
+  // Saldo a favor que pasa al periodo siguiente.
+  carryForward   Decimal @default(0) @db.Decimal(15, 2)
+
+  incomeTaxBase Decimal @default(0) @db.Decimal(15, 2)
+  incomeTaxRate Decimal @default(0) @db.Decimal(7, 4)
+  incomeTax     Decimal @default(0) @db.Decimal(15, 2)
+
+  totalToPay Decimal @default(0) @db.Decimal(15, 2)
+
+  presentedAt DateTime?
+  orderNumber String?   @db.VarChar(30)
+  receiptKey  String? // constancia en el almacen de archivos
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([clientId, period])
+  @@index([clientId, status])
+  @@map("tax_returns")
+}
+
+// ---------------------------------------------------------------------------
+// Exportaciones PLE
+// ---------------------------------------------------------------------------
+
+// Deja constancia de que se genero, con que estructura y con que totales.
+// Si SUNAT observa un libro, hay que poder reconstruir exactamente lo que se
+// presento y cuando.
+model PleExport {
+  id            String   @id @default(cuid())
+  period        String   @db.VarChar(7)
+  bookCode      String   @db.VarChar(8)
+  bookName      String
+  fileName      String
+  layoutVersion String
+  lineCount     Int
+  totalDebit    Decimal? @db.Decimal(15, 2)
+  totalCredit   Decimal? @db.Decimal(15, 2)
+  checksum      String? // hash del contenido generado
+  storageKey    String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  generatedById String?
+  generatedAt   DateTime @default(now())
+
+  @@index([clientId, period])
+  @@map("ple_exports")
+}
+
+// ===========================================================================
+// FASE 3 - PLANILLAS
+// ===========================================================================
+
+enum PensionSystem {
+  ONP
+  AFP
+}
+
+enum CommissionType {
+  FLUJO // sobre la remuneracion del mes
+  MIXTA // flujo reducido + comision sobre el saldo acumulado
+}
+
+enum ContractType {
+  INDEFINIDO
+  PLAZO_FIJO
+  TIEMPO_PARCIAL
+  LOCACION // recibo por honorarios: no va en planilla de 5ta
+}
+
+enum HealthSystem {
+  ESSALUD
+  EPS
+}
+
+enum EmployeeStatus {
+  ACTIVO
+  CESADO
+}
+
+enum PayrollStatus {
+  BORRADOR
+  CERRADA
+}
+
+model Employee {
+  id        String         @id @default(cuid())
+  docType   String         @db.VarChar(1) // catalogo 6
+  docNumber String         @db.VarChar(15)
+  firstName String
+  lastName  String
+  birthDate DateTime?
+  position  String?
+  status    EmployeeStatus @default(ACTIVO)
+
+  contractType   ContractType @default(INDEFINIDO)
+  hireDate       DateTime
+  terminationDate DateTime?
+
+  basicSalary     Decimal @db.Decimal(12, 2)
+  // Asignacion familiar: 10% de la RMV para quien tiene hijos menores.
+  familyAllowance Boolean @default(false)
+
+  pensionSystem  PensionSystem  @default(ONP)
+  afpCode        String?        @db.VarChar(10)
+  afpCuspp       String?        @db.VarChar(20)
+  commissionType CommissionType @default(FLUJO)
+
+  healthSystem HealthSystem @default(ESSALUD)
+  // Trabajo de riesgo: obliga al SCTR.
+  highRisk     Boolean      @default(false)
+
+  bankAccount String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payrollItems PayrollItem[]
+
+  @@unique([clientId, docNumber])
+  @@index([clientId, status])
+  @@map("employees")
+}
+
+model PayrollRun {
+  id     String        @id @default(cuid())
+  period String        @db.VarChar(7)
+  status PayrollStatus @default(BORRADOR)
+
+  totalGross      Decimal @default(0) @db.Decimal(15, 2)
+  totalDeductions Decimal @default(0) @db.Decimal(15, 2)
+  totalNet        Decimal @default(0) @db.Decimal(15, 2)
+  totalEmployer   Decimal @default(0) @db.Decimal(15, 2)
+  employeeCount   Int     @default(0)
+
+  closedAt   DateTime?
+  closedById String?
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items PayrollItem[]
+
+  @@unique([clientId, period])
+  @@index([clientId, status])
+  @@map("payroll_runs")
+}
+
+model PayrollItem {
+  id String @id @default(cuid())
+
+  workedDays    Int @default(30)
+  absentDays    Int @default(0)
+  overtimeHours Decimal @default(0) @db.Decimal(6, 2)
+
+  // Ingresos
+  basicPay        Decimal @default(0) @db.Decimal(12, 2)
+  familyAllowance Decimal @default(0) @db.Decimal(12, 2)
+  overtimePay     Decimal @default(0) @db.Decimal(12, 2)
+  bonuses         Decimal @default(0) @db.Decimal(12, 2)
+  grossPay        Decimal @default(0) @db.Decimal(12, 2)
+
+  // Descuentos al trabajador
+  pensionContribution Decimal @default(0) @db.Decimal(12, 2)
+  pensionCommission   Decimal @default(0) @db.Decimal(12, 2)
+  pensionInsurance    Decimal @default(0) @db.Decimal(12, 2)
+  incomeTax5th        Decimal @default(0) @db.Decimal(12, 2)
+  otherDeductions     Decimal @default(0) @db.Decimal(12, 2)
+  totalDeductions     Decimal @default(0) @db.Decimal(12, 2)
+
+  netPay Decimal @default(0) @db.Decimal(12, 2)
+
+  // Aportes de cargo del empleador
+  employerEssalud Decimal @default(0) @db.Decimal(12, 2)
+  employerSctr    Decimal @default(0) @db.Decimal(12, 2)
+  employerTotal   Decimal @default(0) @db.Decimal(12, 2)
+
+  // Detalle del calculo, para poder auditar como se llego a cada cifra.
+  breakdown Json?
+
+  runId String
+  run   PayrollRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, employeeId])
+  @@index([employeeId])
+  @@map("payroll_items")
+}
+
+// ---------------------------------------------------------------------------
+// Parametros normativos
+// ---------------------------------------------------------------------------
+
+// Tasas de pensiones vigentes por rango de fechas.
+//
+// Van en base de datos y NO en el codigo porque cambian por norma varias veces
+// al anio, y porque recalcular una planilla de hace seis meses exige la tasa
+// que regia ENTONCES. Una constante haria que reprocesar el pasado diera
+// cifras falsas.
+model PensionRate {
+  id        String        @id @default(cuid())
+  system    PensionSystem
+  afpCode   String?       @db.VarChar(10)
+  afpName   String?
+
+  validFrom DateTime
+  validTo   DateTime?
+
+  contributionRate    Decimal  @db.Decimal(7, 5) // aporte obligatorio
+  commissionFlowRate  Decimal? @db.Decimal(7, 5)
+  commissionMixedRate Decimal? @db.Decimal(7, 5)
+  insuranceRate       Decimal? @db.Decimal(7, 5) // prima de seguro
+  // Tope sobre el que se calcula la prima de seguro.
+  insuranceCap        Decimal? @db.Decimal(12, 2)
+
+  @@index([system, validFrom])
+  @@map("pension_rates")
+}
+
+// Parametros anuales: UIT, remuneracion minima, tasas de EsSalud y de renta.
+model TaxParameter {
+  id   String @id @default(cuid())
+  year Int    @unique
+
+  uit             Decimal @db.Decimal(12, 2)
+  minimumWage     Decimal @db.Decimal(12, 2)
+  essaludRate     Decimal @db.Decimal(7, 5)
+  sctrRate        Decimal @db.Decimal(7, 5)
+  igvRate         Decimal @db.Decimal(7, 5)
+  // Tramos de renta de quinta categoria, en UIT: [{ upToUit, rate }]
+  incomeTaxBrackets Json
+
+  createdAt DateTime @default(now())
+
+  @@map("tax_parameters")
 }

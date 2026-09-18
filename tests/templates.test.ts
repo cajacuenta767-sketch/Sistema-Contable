@@ -96,3 +96,39 @@ describe('formato de fechas', () => {
     expect(formatDate(new Date('2026-09-19T04:00:00.000Z'))).toContain('18')
   })
 })
+
+describe('fechas de calendario en la entrada', () => {
+  it('normaliza una fecha sin hora al mediodia UTC', async () => {
+    const { createDocumentSchema } = await import('@/lib/validation')
+    const parsed = createDocumentSchema.parse({
+      clientId: 'c1',
+      kind: 'VENTA',
+      docType: '01',
+      serie: 'F001',
+      number: '1',
+      issueDate: '2026-08-20',
+      counterpartyDocType: '6',
+      counterpartyDocNumber: '20100070970',
+      counterpartyName: 'Prueba SAC',
+      total: '118.00',
+    })
+
+    // Regresion: sin normalizar, new Date('2026-08-20') es medianoche UTC y en
+    // Lima cae el 19. Una factura del 20 se exportaria al PLE como del 19.
+    expect(parsed.issueDate.toISOString()).toBe('2026-08-20T12:00:00.000Z')
+    expect(
+      parsed.issueDate.toLocaleDateString('es-PE', { timeZone: 'America/Lima' }),
+    ).toContain('20')
+  })
+
+  it('respeta un instante que ya trae hora', async () => {
+    const { createDocumentSchema } = await import('@/lib/validation')
+    const parsed = createDocumentSchema.parse({
+      clientId: 'c1', kind: 'VENTA', docType: '01', serie: 'F001', number: '1',
+      issueDate: '2026-08-20T09:30:00.000Z',
+      counterpartyDocType: '6', counterpartyDocNumber: '20100070970',
+      counterpartyName: 'Prueba SAC', total: '118.00',
+    })
+    expect(parsed.issueDate.toISOString()).toBe('2026-08-20T09:30:00.000Z')
+  })
+})

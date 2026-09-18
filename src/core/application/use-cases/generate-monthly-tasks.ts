@@ -7,7 +7,6 @@ import type {
   CreateTaskInput,
   SunatScheduleRepository,
   TaskRepository,
-  TemplateRecord,
   TemplateRepository,
 } from '../ports'
 

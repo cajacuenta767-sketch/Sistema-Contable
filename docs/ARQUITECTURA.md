@@ -243,3 +243,154 @@ Una advertencia que conviene dejar escrita: los importes contables **no deben
 pasar por `number`**. Hoy `monthlyFee` se convierte a `number` porque es un
 honorario de referencia y el redondeo es inocuo. En contabilidad no lo es: ahí
 hay que trabajar con `Decimal` de extremo a extremo.
+
+---
+
+## 9. Motor contable (Fase 2)
+
+### El problema central: precisión
+
+En contabilidad un error de redondeo no es cosmético. En punto flotante
+`0.1 + 0.2 === 0.30000000000000004`; sumando cientos de comprobantes ese error
+se acumula, el libro deja de cuadrar y una base imponible mal redondeada es una
+declaración mal presentada.
+
+Por eso hay un value object `Money` que representa el importe como **BigInt en
+céntimos**. Nunca `number`.
+
+```
+Money.fromString('0.10').add(Money.fromString('0.20')).toString()  // "0.30"
+Money.sum(Array(1000).fill(Money.fromString('0.01'))).toString()   // "10.00"
+```
+
+La regla se sostiene de extremo a extremo:
+
+| Capa | Representación |
+|---|---|
+| Base de datos | `Decimal(15,2)`, nunca `Float` |
+| Repositorio | conversión vía **cadena** (`decimal.toString()`), nunca `.toNumber()` |
+| Dominio | `Money` (BigInt) |
+| API | cadena (`"1234.56"`), nunca número JSON |
+| Interfaz | cadena ya formateada; el navegador no recalcula |
+
+Un JSON con `1234.56` obligaría al cliente a parsearlo como double, y cualquier
+suma en el navegador reintroduciría el error que todo el backend evita.
+
+**Un solo redondeo por cálculo.** `Money.compute({ multiplyBy, divideBy })`
+acumula el producto completo en BigInt y redondea una única vez al final.
+Encadenar multiplicaciones redondea en cada paso: una hora extra calculada como
+`(sueldo / 30 / 8)` redondeado, por horas, por 1.25, difiere en céntimos del
+cálculo directo `sueldo × horas × 1.25 / 240`. En una planilla de cien
+trabajadores esa diferencia se ve, y el trabajador la reclama.
+
+### Invariantes que no se negocian
+
+1. **Ningún asiento entra descuadrado.** La validación de partida doble vive en
+   el dominio y se aplica igual al asiento manual que al automático. Además se
+   revalida al confirmar: entre creación y confirmación el asiento pudo
+   editarse, y uno confirmado descuadrado envenena todo el mayor.
+
+2. **Un periodo cerrado no admite escrituras.** Un periodo cerrado es un periodo
+   ya declarado; si se le agregan asientos, los libros dejan de coincidir con la
+   declaración presentada. Reabrir exige el permiso más alto y queda auditado.
+
+3. **Un asiento confirmado no se borra: se extorna.** Se crea el asiento inverso
+   y ambos quedan. Borrar destruye el rastro, y en contabilidad el rastro es el
+   punto.
+
+4. **Las cuentas de agrupación no reciben movimiento.** Cargar en «60 Compras»
+   en vez de en «6011 Mercaderías manufacturadas» impide analizar y rompe el
+   libro electrónico.
+
+5. **Ningún estado financiero se emite sobre un balance descuadrado.** Si las
+   sumas no coinciden hay un asiento mal grabado, y presentar un EEFF construido
+   encima sería presentar una cifra falsa. El caso de uso lo rechaza con el
+   motivo.
+
+### Libros electrónicos (PLE)
+
+Las estructuras viven en `ple/layout.ts` como **datos**, no repartidas por el
+código: SUNAT las cambia por resolución, y actualizar debe ser editar una tabla,
+no tocar la lógica de generación.
+
+Tres detalles de formato que hacen rechazar el archivo si se omiten, y que están
+cubiertos por tests:
+
+- Cada línea termina **también** en `|`, no solo separa con él.
+- El salto de línea es **CRLF**, no LF.
+- La codificación es **Latin-1**, no UTF-8. Una razón social con eñe enviada en
+  UTF-8 llega corrupta al validador.
+
+Un `|` dentro de una razón social corre todas las columnas siguientes y corrompe
+el archivo entero: se neutraliza al serializar.
+
+Cada generación deja constancia con el **hash SHA-256** del contenido y la
+versión de estructura usada. Si SUNAT observa un libro meses después, hay que
+poder demostrar exactamente qué se presentó y cuándo.
+
+### Fechas de calendario
+
+Una fecha de emisión es un **día de calendario**, no un instante. Un input
+`type="date"` envía `"2026-08-20"`, y `new Date("2026-08-20")` lo interpreta
+como medianoche UTC — que en Lima es el 19 a las 19:00. Guardada así, una
+factura del 20 se exporta al PLE como del 19.
+
+El esquema de entrada normaliza toda fecha de calendario al **mediodía UTC**,
+con lo que el día es el mismo en cualquier zona horaria relevante. Hay tests de
+regresión para esto.
+
+---
+
+## 10. Planillas (Fase 3)
+
+### Los parámetros no viven en el código
+
+UIT, remuneración mínima, tasas de EsSalud y SCTR, tramos de renta y comisiones
+de AFP están en base de datos, con **rango de vigencia**. No es purismo: cambian
+por norma varias veces al año, y recalcular la planilla de hace seis meses exige
+las tasas que regían *entonces*. Una constante en el código haría que reprocesar
+el pasado diera cifras distintas a las que realmente se pagaron — exactamente lo
+que una fiscalización detecta.
+
+Por el mismo motivo, `EmployeeRepository.activeAt(date)` no filtra por
+`status = ACTIVO`: incluye a quien ya cesó pero trabajó ese mes y excluye a quien
+ingresó después. El estado actual no sirve para reconstruir el pasado.
+
+### Trazabilidad del cálculo
+
+Toda boleta incluye un `breakdown` con cada paso intermedio: sueldo diario, valor
+hora, base de cada descuento, proyección anual de renta, tramos aplicados. No es
+decoración: cuando un trabajador reclama su boleta o SUNAFIL pide el sustento,
+hay que poder mostrar de dónde sale cada cifra. Una boleta que solo muestra el
+neto no se puede defender.
+
+### Decisiones de cálculo, explícitas
+
+- **EsSalud nunca se calcula sobre una base menor a la RMV**, aunque la
+  remuneración lo sea. Es una regla del régimen, no una decisión del sistema.
+- **La prima del seguro de AFP tiene tope**; el aporte al fondo no.
+- **La renta de quinta se calcula sobre el ingreso sin descontar pensiones**: el
+  aporte previsional no es deducible de quinta.
+- **Un trabajador sin tasas de pensión cargadas queda FUERA del cálculo, con
+  aviso.** Inventar una tasa produciría una boleta con cifras falsas.
+- **Un contrato de locación de servicios no entra en la planilla**: sus
+  honorarios son renta de cuarta categoría.
+
+---
+
+## 11. Índices añadidos en las fases 2 y 3
+
+| Índice | Consulta que sostiene |
+|---|---|
+| `tax_documents(clientId, kind, docType, serie, number)` **único** | Deduplicación al digitar y al importar |
+| `tax_documents(clientId, period, kind)` | Armado de los libros de ventas y compras |
+| `journal_entries(clientId, period, number)` **único** | Correlativo del periodo |
+| `journal_lines(accountCode)` | Mayor y balance de comprobación |
+| `accounting_periods(clientId, period)` **único** | Verificación de periodo abierto en cada escritura |
+| `payroll_runs(clientId, period)` **único** | Una planilla por periodo |
+| `payroll_items(runId, employeeId)` **único** | Una boleta por trabajador y periodo |
+| `pension_rates(system, validFrom)` | Tasas vigentes a una fecha |
+
+El balance de comprobación se agrega **en SQL**, no en memoria: un ejercicio
+completo puede tener cientos de miles de líneas y traerlas todas para sumarlas en
+JavaScript es justamente lo que no hay que hacer.

@@ -3,9 +3,9 @@
 Sistema de gestión para estudios contables peruanos: clientes, tareas, control
 del personal y cumplimiento de vencimientos SUNAT.
 
-Es el **MVP del Sistema A** (gestión del estudio). El motor contable —libros
-PLE, asientos, estados financieros— está diseñado en el esquema de datos pero
-no implementado todavía; ver [Alcance](#alcance-de-esta-versión).
+Cubre las tres fases: gestión del estudio, motor contable (comprobantes,
+asientos, libros PLE, estados financieros, determinación mensual) y planillas.
+Ver [Alcance](#alcance-de-esta-versión) para lo que el sistema **no** hace.
 
 ---
 
@@ -22,8 +22,28 @@ no implementado todavía; ver [Alcance](#alcance-de-esta-versión).
 | Dashboard de productividad y avance diario del personal | ✅ |
 | Reportes diario / semanal / mensual | ✅ |
 | Acceso desde computadora y celular (responsive) | ✅ |
-| Libros electrónicos PLE, asientos, EEFF | ⬜ Fase 2 |
-| Planillas / PLAME | ⬜ Fase 3 |
+| **Fase 2 — Motor contable** | |
+| Plan Contable General Empresarial (PCGE 2019) | ✅ |
+| Comprobantes de venta y compra, con validación de IGV | ✅ |
+| Importación masiva con deduplicación | ✅ |
+| Asiento automático desde el comprobante | ✅ |
+| Asientos manuales y de ajuste, con partida doble verificada | ✅ |
+| Extorno de asientos (sin borrar el original) | ✅ |
+| Cierre y reapertura de periodo contable | ✅ |
+| Balance de comprobación (4 pares de columnas) | ✅ |
+| Estado de Situación Financiera y Estado de Resultados | ✅ |
+| Libro Mayor | ✅ |
+| Libros electrónicos PLE: Ventas, Compras, Diario, Mayor | ✅ |
+| Determinación mensual de IGV y pago a cuenta de Renta | ✅ |
+| **Fase 3 — Planillas** | |
+| Trabajadores, contratos y datos previsionales | ✅ |
+| Cálculo de planilla: prorrateo, horas extras, asignación familiar | ✅ |
+| Descuentos ONP / AFP (aporte, comisión, prima con tope) | ✅ |
+| Renta de quinta categoría por proyección anual | ✅ |
+| Aportes del empleador: EsSalud y SCTR | ✅ |
+| Boleta con el detalle completo del cálculo | ✅ |
+| Cierre y reapertura de planilla | ✅ |
+| Archivo PLAME | ⬜ Pendiente |
 
 ---
 
@@ -48,9 +68,13 @@ docker compose up -d
 npm run db:push
 npm run db:seed
 
-# 5. Genere las tareas del periodo y algo de actividad de demostración
+# 5. Plan contable, parámetros normativos y datos de ejemplo
+npm run db:seed:accounting
+
+# 6. Genere tareas, actividad y el circuito contable completo
 npm run jobs:generate-tasks
 npm run demo:activity
+npm run demo:accounting
 
 # 6. Arranque
 npm run dev
@@ -82,7 +106,9 @@ npm run db:migrate           # migración versionada (producción)
 npm run db:seed              # datos de ejemplo
 npm run db:studio            # explorador de la base
 npm run jobs:generate-tasks  # expande las plantillas del periodo anterior
+npm run db:seed:accounting   # PCGE, parámetros normativos y datos de ejemplo
 npm run demo:activity        # mueve tareas por la máquina de estados (demo)
+npm run demo:accounting       # recorre el circuito contable completo (demo)
 ```
 
 ---
@@ -166,6 +192,9 @@ dominio corren en milisegundos sin levantar una base de datos.
 - Toda consulta usa parámetros; no hay concatenación de SQL.
 - Los errores internos nunca llegan al navegador: se registran en el servidor y
   el cliente recibe un mensaje genérico con un código de referencia.
+- Un periodo contable cerrado no admite escrituras, y reabrirlo exige el rol más
+  alto y queda auditado.
+- Ningún asiento entra descuadrado, ni manual ni automático.
 
 ---
 
@@ -174,15 +203,45 @@ dominio corren en milisegundos sin levantar una base de datos.
 **Lo que este sistema hace:** organiza el trabajo del estudio y evita que se
 pasen vencimientos.
 
-**Lo que no hace, y conviene tener claro:**
+**Lo que no hace, y conviene tener muy claro:**
 
 1. **No presenta declaraciones ante SUNAT.** No existe una API pública para
    hacerlo desde un sistema externo; la presentación se hace en SUNAT
-   Operaciones en Línea o con los programas de SUNAT. El sistema controla que se
-   haga y registra la constancia.
-2. **No calcula tributos ni genera libros.** El esquema de datos está preparado
-   para el módulo contable (Fase 2), pero no está implementado.
-3. **Las fechas estimadas no son oficiales.** Ver
+   Operaciones en Línea o con los programas de SUNAT. El sistema calcula la
+   base, controla que se presente y registra la constancia con su número de
+   orden.
+
+2. **Las estructuras del PLE deben verificarse antes de presentar.** SUNAT las
+   fija por resolución y cambian: se agregan campos y se renumeran columnas. Las
+   estructuras incluidas (`src/core/domain/accounting/ple/layout.ts`) son de
+   referencia y están marcadas con su versión; cada archivo generado registra
+   con cuál se emitió. **Pase siempre el archivo por el validador del PLE antes
+   de presentarlo.**
+
+3. **Las cifras normativas cargadas son de referencia.** UIT, remuneración
+   mínima, tasas de EsSalud y SCTR y comisiones de las AFP se siembran con
+   valores de prueba. Viven en base de datos justamente para que actualizarlas
+   no exija tocar código: verifíquelas contra la norma vigente antes de calcular
+   una planilla real.
+
+4. **La clasificación corriente / no corriente del ESF es una aproximación.** Se
+   deriva del código de cuenta del PCGE. Lo corriente se define por el plazo real
+   de realización o exigibilidad, que depende del vencimiento de cada partida.
+   El reporte lo advierte; para los EEFF anuales, reclasifique.
+
+5. **El pago a cuenta de Renta usa las tasas generales.** El Régimen General
+   admite calcular por coeficiente cuando resulta mayor, y el sistema no lo hace
+   automáticamente: avisa para que el contador lo verifique.
+
+6. **La renta de quinta se proyecta con el método estándar.** No contempla los
+   ajustes por ingresos extraordinarios del artículo 41 del reglamento. Para un
+   trabajador con bonos variables altos, revise el último trimestre.
+
+7. **Falta el archivo PLAME.** La planilla se calcula completa, pero la
+   generación del archivo para el PDT PLAME no está implementada.
+
+8. **Las fechas estimadas del cronograma no son oficiales.** Ver
    [Carga del cronograma SUNAT](#carga-del-cronograma-sunat).
-4. **Requiere mantenimiento anual.** Los formatos PLE y el cronograma cambian
-   por resolución. No es un sistema que se instala y se olvida.
+
+9. **Requiere mantenimiento anual.** Formatos PLE, cronograma, UIT, RMV y tasas
+   cambian por resolución. No es un sistema que se instala y se olvida.

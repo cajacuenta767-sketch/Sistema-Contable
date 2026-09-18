@@ -25,10 +25,14 @@ export function jsonError(code: string, message: string, status: number, details
 /**
  * Envuelve un handler y normaliza cualquier error.
  * El handler solo se ocupa del camino feliz: lanza y se acabo.
+ *
+ * El tipo de retorno es `Response` y no `NextResponse` porque hay rutas que
+ * devuelven algo que no es JSON —la descarga de un libro electronico, por
+ * ejemplo— y forzarlas a NextResponse solo agregaria un cast inutil.
  */
 export function withErrorHandling<Args extends unknown[]>(
-  handler: (...args: Args) => Promise<NextResponse>,
-): (...args: Args) => Promise<NextResponse> {
+  handler: (...args: Args) => Promise<Response>,
+): (...args: Args) => Promise<Response> {
   return async (...args: Args) => {
     try {
       return await handler(...args)

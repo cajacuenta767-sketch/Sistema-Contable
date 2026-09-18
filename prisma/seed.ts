@@ -114,7 +114,7 @@ async function main() {
           status: index % 17 === 0 ? 'SUSPENDED' : 'ACTIVE',
           accountantId: accountants[index % accountants.length]?.id ?? null,
           monthlyFee: 350 + (index % 6) * 120,
-          serviceStart: new Date(Date.UTC(2024, index % 12, 1)),
+          serviceStart: new Date(Date.UTC(2024, index % 12, 1, 12)),
           contactName: 'Area de contabilidad',
           contactPhone: `9${String(90000000 + index * 7331).slice(0, 8)}`,
         },
